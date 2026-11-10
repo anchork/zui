@@ -70,6 +70,47 @@ Nodes.hx - drawing node systems
 nodes.nodeCanvas(...); // See examples
 ```
 
+## Mobile
+
+Touch support in the core (`Zui.hx`), switched on at runtime:
+``` hx
+Zui.touchInput     // true while input comes from a finger (set automatically by zui.mobile.Mobile)
+Zui.touchScroll    // drag windows with a finger
+Zui.kineticScroll  // keep scrolling after a flick (Zui.scrollFriction)
+Zui.touchSlop      // dp a finger may move before a tap becomes a drag
+Zui.softKeyboard   // bridge for on-screen keyboards / IME (zui.mobile.HtmlSoftKeyboard on HTML5)
+```
+With `touchInput`, presses jump to the finger position, lifted fingers stop hovering, taps that turned into
+scrolls are not released, sliders follow the finger and do not open a text editor, and combos hide their
+search field. Elements scrolled outside their window ignore input that lands next to the window.
+
+`zui.mobile` adds screen layout, widgets and overlays on top of that:
+``` hx
+Mobile.init(ui, {iconFont: Assets.fonts.icons}); // DPI scale, full-screen canvas, safe areas, keyboard bridge
+
+// In render():
+Mobile.begin(ui, g);
+Mobile.appBar(ui, "Title", null, [Icons.SEARCH]);         // top bar, returns tapped icon index
+var tab = Mobile.tabBar(ui, hTabs, [{icon: Icons.HOME, label: "Home"}, ...]);
+if (Mobile.content(ui, hContent)) {                      // scrolling window between the bars
+	Widgets.button(ui, "Save", Filled, Icons.CHECK);
+	Widgets.toggle(ui, Id.handle(), "Wi-Fi");
+	ui.check(Id.handle(), "Standard zui elements work too");
+}
+if (Mobile.fab(ui, Icons.ADD)) Overlay.toast("Added");
+Mobile.end(ui);                                          // draws dialogs, sheets and toasts
+```
+- `Widgets`: button (filled / tonal / outlined / text / danger), iconButton, toggle, segmented, stepper, slider,
+  progress, spinner, listItem, sectionHeader, paragraph, chips, pageDots, textField, searchBar, card / endCard,
+  wheelPicker, margin, space
+- `Overlay`: alert, actionSheet, toast (modal overlays block input below them)
+- `MobileThemes.light` / `dark` / `create(dark, primaryColor)`: colors plus a touch sized zui theme (48dp rows)
+- `Icons`: Material Icons code points, `Draw`: rounded shapes, text and icon helpers
+
+On HTML5, add `project.addDefine('kha_html5_disable_automatic_size_adjust');` so `Mobile` can size the canvas
+at device resolution. Text fields raise the on-screen keyboard through a hidden `<input>`, which also gives
+IME (e.g. Japanese) input on desktop browsers.
+
 ## Examples
 Check out [examples/](https://github.com/armory3d/zui/tree/master/examples) folder. To run specific example, simply drop it's folder into [KodeStudio](https://github.com/KTXSoftware/KodeStudio/releases) and hit run. If you are having trouble compiling, clone latest [Kha](https://github.com/Kode/Kha) repository into your example folder (alongside the `khafile.js`). This will let KodeStudio pick up the most recent Kha.
 

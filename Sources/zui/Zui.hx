@@ -51,6 +51,17 @@ class Zui {
 	public static var touchScroll = false; // Pan with finger to scroll
 	public static var touchHold = false; // Touch and hold finger for right click
 	public static var touchTooltip = false; // Show extra tooltips above finger / on-screen keyboard
+	public static var touchInput = #if (kha_android || kha_ios) true #else false #end; // Input currently comes from a finger (no hover, coarse pointer)
+	public static var touchSlop = 8.0; // Distance (unscaled px) a finger may travel before a tap turns into a drag
+	public static var kineticScroll = true; // Keep touch-scrolled windows moving after a flick
+	public static var scrollFriction = 0.95; // Kinetic scroll velocity multiplier per frame
+	public static var softKeyboard: SoftKeyboard = null; // Text input bridge for on-screen keyboards / IME
+	var touchDragging = false; // Finger moved past touchSlop since press
+	var touchScrollCandidate: Handle = null; // Window the finger landed in
+	var touchScrollHandle: Handle = null; // Window being dragged by finger
+	var textEditWindow: Handle = null; // Window holding the text field being edited
+	var textHitAreas: Array<TextHitArea> = []; // Screen rects of text fields, used to raise the keyboard inside the input event
+	var frameCount = 0;
 	var touchHoldActivated = false;
 	var sliderTooltip = false;
 	var sliderTooltipX = 0.0;
@@ -282,6 +293,8 @@ class Zui {
 		changed = false;
 		globalG = g;
 		current = this;
+		frameCount++;
+		removeTextHitAreas(null);
 		_x = 0; // Reset cursor
 		_y = 0;
 		_w = 0;
@@ -338,6 +351,11 @@ class Zui {
 	}
 
 	function endInput() {
+		if (touchInput && !inputDown && !inputDownR) {
+			// Fingers do not hover: once lifted, move the pointer away so nothing stays highlighted
+			inputX = inputY = inputStartedX = inputStartedY = -1000000;
+		}
+		if (softKeyboard != null) softKeyboard.update(this);
 		isKeyPressed = false;
 		inputStarted = false;
 		inputStartedR = false;
@@ -368,7 +386,7 @@ class Zui {
 		var wx = x + handle.dragX;
 		var wy = y + handle.dragY;
 		var inputChanged = getInputInRect(wx, wy, w, h) && inputChanged();
-		return alwaysRedraw || isScrolling || inputChanged;
+		return alwaysRedraw || isScrolling || inputChanged || handle.scrollVelocity != 0;
 	}
 
 	// Returns true if redraw is needed
@@ -379,6 +397,7 @@ class Zui {
 
 		if (!windowEnded) endWindow(); // End previous window if necessary
 		windowEnded = false;
+		handle.lastFrame = frameCount;
 
 		g = handle.texture.g2; // Set g
 		currentWindow = handle;
@@ -412,6 +431,7 @@ class Zui {
 			return false;
 		}
 
+		removeTextHitAreas(handle);
 		_x = 0;
 		_y = handle.scrollOffset;
 		if (handle.layout == Horizontal) w = Std.int(ELEMENT_W());
@@ -471,6 +491,8 @@ class Zui {
 			if (fullHeight < wh || handle.layout == Horizontal || !scrollEnabled) { // Disable scrollbar
 				handle.scrollEnabled = false;
 				handle.scrollOffset = 0;
+				handle.scrollVelocity = 0;
+				if (touchScrollHandle == handle) touchScrollHandle = null;
 			}
 			else { // Draw window scrollbar if necessary
 				handle.scrollEnabled = true;
@@ -496,10 +518,7 @@ class Zui {
 				}
 
 				var scrollDelta: Float = inputWheelDelta;
-				if (touchScroll && inputDown && inputDY != 0 && inputX > _windowX + windowHeaderW&& inputY > _windowY + windowHeaderH) {
-					isScrolling = true;
-					scrollDelta = -inputDY / 20;
-				}
+				if (touchScroll) updateTouchScroll(handle, wy, wh);
 				if (handle == scrollHandle) { // Scroll
 					scroll(inputDY * e, fullHeight);
 				}
@@ -511,13 +530,15 @@ class Zui {
 				// Stay in bounds
 				if (handle.scrollOffset > 0) {
 					handle.scrollOffset = 0;
+					handle.scrollVelocity = 0;
 				}
 				else if (fullHeight + handle.scrollOffset < wh) {
 					handle.scrollOffset = wh - fullHeight;
+					handle.scrollVelocity = 0;
 				}
 
 				g.color = t.ACCENT_COL; // Bar
-				var scrollbarFocus = getInputInRect(_windowX + _windowW - SCROLL_W(), wy, SCROLL_W(), wh);
+				var scrollbarFocus = !touchInput && getInputInRect(_windowX + _windowW - SCROLL_W(), wy, SCROLL_W(), wh);
 				var barW = (scrollbarFocus || handle == scrollHandle) ? SCROLL_W() : SCROLL_W() / 3;
 				g.fillRect(_windowW - barW - scrollAlign, barY, barW, barH);
 			}
@@ -545,6 +566,43 @@ class Zui {
 
 	function scroll(delta: Float, fullHeight: Float) {
 		currentWindow.scrollOffset -= delta;
+	}
+
+	function updateTouchScroll(handle: Handle, wy: Float, wh: Float) {
+		var inContent = getInputInRect(_windowX + windowHeaderW, wy, _windowW - windowHeaderW, wh);
+		if (inputStarted && inContent) {
+			handle.scrollVelocity = 0; // Finger stops the flick
+			// Elements that capture the drag (sliders, scrollbar) have already claimed scrollHandle
+			if (scrollHandle == null) touchScrollCandidate = handle;
+		}
+		if (touchScrollCandidate == handle && touchScrollHandle == null) {
+			if (!inputDown || scrollHandle != null) {
+				touchScrollCandidate = null;
+			}
+			else if (touchDragging && Math.abs(inputY - inputStartedY) >= Math.abs(inputX - inputStartedX)) {
+				touchScrollCandidate = null;
+				touchScrollHandle = handle;
+				isScrolling = true;
+				handle.scrollVelocity = 0;
+			}
+		}
+		if (touchScrollHandle == handle) {
+			if (inputDown) {
+				handle.scrollOffset += inputDY;
+				handle.scrollVelocity = handle.scrollVelocity * 0.4 + inputDY * 0.6;
+				handle.redraws = 2;
+			}
+			else {
+				touchScrollHandle = null;
+				if (!kineticScroll) handle.scrollVelocity = 0;
+			}
+		}
+		else if (handle.scrollVelocity != 0) {
+			handle.scrollOffset += handle.scrollVelocity;
+			handle.scrollVelocity *= scrollFriction;
+			if (Math.abs(handle.scrollVelocity) < 0.1 * SCALE()) handle.scrollVelocity = 0;
+			handle.redraws = 2;
+		}
 	}
 
 	public function tab(handle: Handle, text: String, vertical = false, color: Int = -1): Bool {
@@ -781,7 +839,45 @@ class Zui {
 		}
 		tabPressedHandle = handle;
 		highlightAnchor = highlightOnSelect ? 0 : cursorX;
-		if (Keyboard.get() != null) Keyboard.get().show();
+		textEditWindow = currentWindow;
+		if (softKeyboard != null) {
+			softKeyboard.show(this, textSelected, cursorX, highlightAnchor, _windowX + _x, _windowY + _y, _w, ELEMENT_H());
+		}
+		else if (Keyboard.get() != null) Keyboard.get().show();
+	}
+
+	/**
+		Replace the state of the text field being edited.
+		Used by soft keyboard bridges that edit the text natively (IME, autocorrect, native selection).
+	**/
+	public function setTextEdit(text: String, cursor: Int, anchor: Int) {
+		if (textSelectedHandle == null) return;
+		textSelected = text;
+		cursorX = cursor < 0 ? 0 : cursor > text.length ? text.length : cursor;
+		highlightAnchor = anchor < 0 ? 0 : anchor > text.length ? text.length : anchor;
+		if (textEditWindow != null) textEditWindow.redraws = 2;
+	}
+
+	/** Finish editing the active text field and submit its text. **/
+	public function deselectTextEdit() {
+		deselectText();
+	}
+
+	public function isEditingText(): Bool {
+		return textSelectedHandle != null;
+	}
+
+	function removeTextHitAreas(win: Handle) {
+		var i = textHitAreas.length;
+		while (--i >= 0) if (textHitAreas[i].win == win) textHitAreas.splice(i, 1);
+	}
+
+	function hitTextArea(x: Float, y: Float): TextHitArea {
+		for (a in textHitAreas) {
+			if (a.win != null && a.win.lastFrame != frameCount) continue; // Window not shown anymore
+			if (x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h) return a;
+		}
+		return null;
 	}
 
 	function submitTextEdit() {
@@ -931,6 +1027,9 @@ class Zui {
 			return handle.text;
 		}
 
+		if (softKeyboard != null && editable) {
+			textHitAreas.push({ win: currentWindow, x: _windowX + _x, y: _windowY + _y, w: _w, h: ELEMENT_H() });
+		}
 		var hover = getHover();
 		if (hover && onTextHover != null) onTextHover();
 		g.color = hover ? t.ACCENT_HOVER_COL : t.ACCENT_COL; // Text bg
@@ -942,6 +1041,10 @@ class Zui {
 			textSelectedHandle = submitTextHandle;
 			submitTextHandle = null;
 			setCursorToInput(align);
+			textEditWindow = currentWindow;
+			if (softKeyboard != null) {
+				softKeyboard.show(this, textSelected, cursorX, highlightAnchor, _windowX + _x, _windowY + _y, _w, ELEMENT_H());
+			}
 		}
 		var startEdit = released || tabPressed;
 		handle.changed = false;
@@ -980,7 +1083,10 @@ class Zui {
 		textSelectedHandle = null;
 		isTyping = false;
 		if (currentWindow != null) currentWindow.redraws = 2;
-		if (Keyboard.get() != null) Keyboard.get().hide();
+		if (textEditWindow != null) textEditWindow.redraws = 2;
+		textEditWindow = null;
+		if (softKeyboard != null) softKeyboard.hide();
+		else if (Keyboard.get() != null) Keyboard.get().hide();
 		highlightAnchor = cursorX;
 		if (onDeselectText != null) onDeselectText();
 	}
@@ -1085,7 +1191,7 @@ class Zui {
 				comboSelectedX = Std.int(_x + _windowX);
 				comboSelectedY = Std.int(_y + _windowY + ELEMENT_H());
 				comboSelectedW = Std.int(_w);
-				comboSearchBar = searchBar;
+				comboSearchBar = searchBar && !touchInput; // Search field would pop the keyboard up
 				for (t in texts) { // Adapt combo list width to combo item width
 					var w = Std.int(ops.font.width(fontSize, t)) + 10;
 					if (comboSelectedW < w) comboSelectedW = w;
@@ -1158,11 +1264,7 @@ class Zui {
 		}
 		else handle.changed = false;
 		
-		#if (!kha_android && !kha_ios)
-		if (handle == scrollHandle && inputDX != 0) { // Scroll
-		#else
-		if (handle == scrollHandle) { // Scroll
-		#end
+		if (handle == scrollHandle && (inputDX != 0 || touchInput)) { // Scroll
 			var range = to - from;
 			var sliderX = _x + _windowX + buttonOffsetY;
 			var sliderW = _w - buttonOffsetY * 2;
@@ -1178,7 +1280,7 @@ class Zui {
 		drawSlider(handle.value, from, to, filled, hover); // Slider
 
 		// Text edit
-		var startEdit = (getReleased() || tabPressed) && textEdit;
+		var startEdit = (getReleased() || tabPressed) && textEdit && !touchInput;
 		if (startEdit) { // Mouse did not move
 			handle.text = handle.value + "";
 			startTextEdit(handle);
@@ -1723,7 +1825,7 @@ class Zui {
 	}
 
 	function getPushed(elemH = -1.0): Bool {
-		isPushed = enabled && inputEnabled && inputDown && getHover(elemH) && getInitialHover(elemH);
+		isPushed = enabled && inputEnabled && inputDown && touchScrollHandle == null && getHover(elemH) && getInitialHover(elemH);
 		return isPushed;
 	}
 
@@ -1732,8 +1834,14 @@ class Zui {
 		return isStarted;
 	}
 
+	// Elements scrolled outside of their window must not react to input landing next to the window
+	inline function inputInWindow(x: Float, y: Float): Bool {
+		return currentWindow == null || (x >= _windowX && x < _windowX + _windowW && y >= _windowY && y < _windowY + _windowH);
+	}
+
 	function getInitialHover(elemH = -1.0): Bool {
 		if (scissor && inputY < _windowY + windowHeaderH) return false;
+		if (!inputInWindow(inputStartedX, inputStartedY)) return false;
 		if (elemH == -1.0) elemH = ELEMENT_H();
 		return enabled && inputEnabled &&
 			inputStartedX >= _windowX + _x && inputStartedX < (_windowX + _x + _w) &&
@@ -1742,6 +1850,7 @@ class Zui {
 
 	function getHover(elemH = -1.0): Bool {
 		if (scissor && inputY < _windowY + windowHeaderH) return false;
+		if (!inputInWindow(inputX, inputY)) return isHovered = false;
 		if (elemH == -1.0) elemH = ELEMENT_H();
 		isHovered = enabled && inputEnabled &&
 			inputX >= _windowX + (highlightFullRow ? 0 : _x) && inputX < (_windowX + _x + (highlightFullRow ? _windowW : _w)) &&
@@ -1760,11 +1869,17 @@ class Zui {
 		button == 0 ? inputStarted = true : inputStartedR = true;
 		button == 0 ? inputDown = true : inputDownR = true;
 		inputStartedTime = kha.Scheduler.time();
+		if (touchInput) { // Fingers teleport: no move events precede the press
+			inputX = x;
+			inputY = y;
+			inputDX = inputDY = 0;
+		}
 		#if (kha_android || kha_ios)
-		setInputPosition(x, y);
+		else setInputPosition(x, y);
 		#end
 		inputStartedX = x;
 		inputStartedY = y;
+		touchDragging = false;
 	}
 
 	public function onMouseUp(button: Int, x: Int, y: Int) {
@@ -1779,7 +1894,9 @@ class Zui {
 			isScrolling = false;
 			scrollHandle = null;
 			sliderTooltip = false;
-			if (x == inputStartedX && y == inputStartedY) { // Mouse not moved
+			touchScrollHandle = null;
+			var tap = touchInput ? !touchDragging : (x == inputStartedX && y == inputStartedY);
+			if (tap) { // Mouse not moved
 				button == 0 ? inputReleased = true : inputReleasedR = true;
 			}
 		}
@@ -1789,8 +1906,16 @@ class Zui {
 		button == 0 ? inputDown = false : inputDownR = false;
 		#if (kha_android || kha_ios)
 		setInputPosition(x, y);
+		#else
+		if (touchInput) setInputPosition(x, y);
 		#end
 		deselectText();
+		// Browsers only raise the on-screen keyboard from inside an input event,
+		// so focus the keyboard bridge here if a text field was tapped
+		if (softKeyboard != null && button == 0 && !touchDragging) {
+			var a = hitTextArea(x, y);
+			if (a != null && a == hitTextArea(inputStartedX, inputStartedY)) softKeyboard.prime(a.x, a.y, a.w, a.h);
+		}
 	}
 
 	public function onMouseMove(x: Int, y: Int, movementX: Int, movementY: Int) {
@@ -1808,6 +1933,12 @@ class Zui {
 		inputDY += y - inputY;
 		inputX = x;
 		inputY = y;
+		if ((inputDown || inputDownR) && !touchDragging) {
+			var dx = inputX - inputStartedX;
+			var dy = inputY - inputStartedY;
+			var slop = touchSlop * SCALE();
+			if (dx * dx + dy * dy > slop * slop) touchDragging = true;
+		}
 	}
 
 	public function onPenDown(x: Int, y: Int, pressure: Float) {
@@ -2026,6 +2157,8 @@ class Handle {
 	public var texture: kha.Image = null;
 	public var redraws = 2;
 	public var scrollOffset = 0.0;
+	public var scrollVelocity = 0.0; // Kinetic touch scrolling, px per frame
+	public var lastFrame = 0; // Last frame the window was shown
 	public var scrollEnabled = false;
 	public var layout: Layout = 0;
 	public var lastMaxX = 0.0;
@@ -2090,6 +2223,29 @@ typedef TColoring = {
 	var start: Array<String>;
 	var end: String;
 	@:optional var separated: Null<Bool>;
+}
+
+typedef TextHitArea = {
+	var win: Handle;
+	var x: Float;
+	var y: Float;
+	var w: Float;
+	var h: Float;
+}
+
+/**
+	Bridge between Zui text fields and a platform text input (on-screen keyboard, IME).
+	See zui.mobile.HtmlSoftKeyboard for the HTML5 implementation.
+**/
+interface SoftKeyboard {
+	/** Called synchronously from the input event when a text field is tapped. x, y, w, h: field rect in pixels. **/
+	function prime(x: Float, y: Float, w: Float, h: Float): Void;
+	/** Text editing started. cursor / anchor: selection ends. **/
+	function show(ui: Zui, text: String, cursor: Int, anchor: Int, x: Float, y: Float, w: Float, h: Float): Void;
+	/** Text editing finished. **/
+	function hide(): Void;
+	/** Called once per frame. **/
+	function update(ui: Zui): Void;
 }
 
 typedef TTextColoring = {
